@@ -1,6 +1,7 @@
 require("dotenv").config();
 const { generateQuiz } = require("./ai/quiz");
 const { PDFParse } = require("pdf-parse");
+const { CanvasFactory } = require("pdf-parse/worker");
 
 const { askAI } = require("./ai/router");
 
@@ -319,31 +320,30 @@ app.post("/extract-pdf", async (req, res) => {
             });
         }
 
-        console.log("📄 PDF received");
+        console.log("📄 Extracting text from PDF...");
         console.log(`📦 Base64 length: ${data.length}`);
 
         const buffer = Buffer.from(data, "base64");
 
-        console.log(`📦 PDF buffer size: ${buffer.length} bytes`);
+        console.log(`📦 PDF size: ${buffer.length} bytes`);
 
         if (!buffer.length) {
             return res.status(400).json({
                 success: false,
-                error: "Invalid or empty PDF data"
+                error: "Empty PDF data"
             });
         }
 
-        // pdf-parse v2
         parser = new PDFParse({
-            data: buffer
+            data: buffer,
+            CanvasFactory
         });
 
         const result = await parser.getText();
+
         const text = (result.text || "").trim();
 
-        console.log(
-            `✅ Extracted ${text.length} characters from PDF`
-        );
+        console.log(`✅ Extracted ${text.length} characters`);
 
         res.json({
             success: true,
@@ -391,8 +391,10 @@ app.post("/pdf/quiz", async (req, res) => {
         const buffer = Buffer.from(data, "base64");
 
         // Extract PDF text
-        parser = new PDFParse({ verbosity: 0 });
-        await parser.load(buffer);
+        parser = new PDFParse({
+            data: buffer,
+            CanvasFactory
+        });
         const pdfResult = await parser.getText();
         const text = (pdfResult.text || "").trim();
 
