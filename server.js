@@ -319,15 +319,31 @@ app.post("/extract-pdf", async (req, res) => {
             });
         }
 
-        console.log("📄 Extracting text from PDF...");
+        console.log("📄 PDF received");
+        console.log(`📦 Base64 length: ${data.length}`);
 
         const buffer = Buffer.from(data, "base64");
-        parser = new PDFParse({ verbosity: 0 });
-        await parser.load(buffer);
+
+        console.log(`📦 PDF buffer size: ${buffer.length} bytes`);
+
+        if (!buffer.length) {
+            return res.status(400).json({
+                success: false,
+                error: "Invalid or empty PDF data"
+            });
+        }
+
+        // pdf-parse v2
+        parser = new PDFParse({
+            data: buffer
+        });
+
         const result = await parser.getText();
         const text = (result.text || "").trim();
 
-        console.log(`✅ Extracted ${text.length} characters from PDF`);
+        console.log(
+            `✅ Extracted ${text.length} characters from PDF`
+        );
 
         res.json({
             success: true,
@@ -336,13 +352,17 @@ app.post("/extract-pdf", async (req, res) => {
 
     } catch (error) {
         console.error("❌ PDF extraction error:", error);
+
         res.status(500).json({
             success: false,
             error: error.message || "Failed to extract PDF"
         });
+
     } finally {
         if (parser) {
-            try { await parser.destroy(); } catch {}
+            try {
+                await parser.destroy();
+            } catch { }
         }
     }
 });
@@ -409,7 +429,7 @@ app.post("/pdf/quiz", async (req, res) => {
         });
     } finally {
         if (parser) {
-            try { await parser.destroy(); } catch {}
+            try { await parser.destroy(); } catch { }
         }
     }
 });
