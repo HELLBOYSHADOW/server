@@ -813,6 +813,186 @@ JSON Format:
     }
 });
 
+// ========================================
+// YOUTUBE VIDEO SUMMARY
+// ========================================
+
+app.post("/ytsummary", async (req, res) => {
+    try {
+        const { transcript, videoId, title } = req.body || {};
+
+        // Validate transcript
+        if (
+            typeof transcript !== "string" ||
+            !transcript.trim()
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: "YouTube transcript is required."
+            });
+        }
+
+        const MAX_TRANSCRIPT_LENGTH = 60000;
+
+        if (transcript.length > MAX_TRANSCRIPT_LENGTH) {
+            return res.status(413).json({
+                success: false,
+                error: `Transcript exceeds the ${MAX_TRANSCRIPT_LENGTH}-character limit.`
+            });
+        }
+
+        console.log(
+            `🎥 Generating YouTube summary | Video: ${videoId || "unknown"} | Transcript: ${transcript.length} characters`
+        );
+
+        // ========================================
+        // STRONG STUDY-SUMMARY PROMPT
+        // ========================================
+
+        const prompt = `
+You are StudentAI, an expert university lecturer, technical educator,
+academic note-maker, and examination-preparation specialist.
+
+Your task is to transform the supplied YouTube lecture transcript into
+accurate, comprehensive, well-organized study notes.
+
+SOURCE MATERIAL:
+${transcript}
+
+${title ? `VIDEO TITLE: ${String(title).slice(0, 300)}` : ""}
+${videoId ? `YOUTUBE VIDEO ID: ${String(videoId).slice(0, 100)}` : ""}
+
+STRICT RULES:
+
+1. SOURCE ACCURACY
+- Use the transcript as your primary and authoritative source.
+- Do not invent facts, examples, statistics, quotations, or explanations.
+- Do not claim the lecturer discussed something that is absent from the transcript.
+- Preserve important technical terminology, definitions, formulas, and distinctions.
+- Correct obvious transcription errors only when the intended meaning is clear.
+- If a passage is unclear, do not guess what it means.
+- You may explain a difficult concept in simpler language, but do not change its meaning.
+
+2. EDUCATIONAL QUALITY
+- Write for a university student preparing for examinations.
+- Explain concepts in clear, student-friendly language.
+- Preserve important details instead of oversimplifying the lecture.
+- Organize related concepts logically.
+- Explain relationships, processes, classifications, advantages, disadvantages,
+  and applications when supported by the transcript.
+- Use examples from the transcript where available.
+- Avoid unnecessary repetition and generic filler.
+
+3. OUTPUT STRUCTURE
+Return the study notes using these Markdown headings in this order:
+
+# Overview
+Give a concise overview of the lecture's main subject and purpose.
+
+# Detailed Notes
+Explain the important concepts in logical order.
+Use numbered steps for processes and bullet points for lists.
+Preserve important technical details.
+
+# Key Concepts
+Identify and explain the most important concepts and principles.
+
+# Important Definitions
+List important terms and their meanings.
+Only include definitions supported by the transcript.
+
+# Examples and Applications
+Include examples, practical applications, and use cases discussed in the lecture.
+If none are provided, explicitly state that the transcript contains no clear examples.
+
+# Important Comparisons
+Include comparisons only when the transcript discusses comparable concepts.
+Use a Markdown table when appropriate.
+Do not invent comparisons.
+
+# Key Takeaways
+Provide the most important points a student should remember.
+
+# Exam Preparation
+Create 5 potential examination questions based strictly on the transcript.
+Include a concise answer outline for each question.
+Use a mixture of short-answer and long-answer questions where the content supports them.
+
+4. FORMATTING
+- Use valid Markdown.
+- Use clear headings and concise paragraphs.
+- Use bullet points and numbered lists appropriately.
+- Use tables only when they improve clarity.
+- Format technical terms and formulas correctly.
+- Do not repeat the entire transcript.
+- Do not include a preamble about your role.
+- Do not output JSON.
+- Do not add information outside the requested study-note sections.
+
+5. CONTENT PRIORITY
+Prioritize concepts emphasized repeatedly or explained in detail.
+Preserve the lecture's terminology and organization when practical.
+If the transcript is incomplete, acknowledge that limitation in the Overview.
+If the transcript contains insufficient information for a requested section,
+say so briefly instead of inventing content.
+
+Produce detailed, accurate, examination-oriented study notes.
+`;
+
+        // ========================================
+        // GENERATE SUMMARY USING AI ROUTER
+        // ========================================
+
+        const result = await askAI({
+            task: "text",
+            prompt,
+            maxTokens: 8000
+        });
+
+        const summary =
+            result.answer ||
+            result.text ||
+            result.content ||
+            result.result;
+
+        if (
+            typeof summary !== "string" ||
+            !summary.trim()
+        ) {
+            throw new Error(
+                "AI returned an empty YouTube summary."
+            );
+        }
+
+        console.log(
+            `✅ YouTube summary generated | Provider: ${result.provider} | Length: ${summary.length}`
+        );
+
+        return res.json({
+            success: true,
+            videoId: videoId || null,
+            title: title || null,
+            provider: result.provider || null,
+            model: result.model || null,
+            result: summary
+        });
+
+    } catch (error) {
+        console.error(
+            "❌ YouTube summary error:",
+            error
+        );
+
+        return res.status(503).json({
+            success: false,
+            error:
+                error.message ||
+                "Failed to generate YouTube summary.",
+            details: error.details || []
+        });
+    }
+});
+
 app.listen(PORT, () => {
     console.log(`
 ╔════════════════════════════════════╗
