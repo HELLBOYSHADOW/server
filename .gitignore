@@ -21,3 +21,5 @@ temp/
 coverage/
 dist/
 build/
+
+eng.traineddata

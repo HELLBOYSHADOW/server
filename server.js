@@ -2,6 +2,16 @@ require("dotenv").config();
 const { generateQuiz } = require("./ai/quiz");
 const { PDFParse } = require("pdf-parse");
 const { CanvasFactory } = require("pdf-parse/worker");
+const { createWorker } = require("tesseract.js");
+const fs = require("fs/promises");
+const os = require("os");
+const path = require("path");
+const { execFile } = require("child_process");
+const { promisify } = require("util");
+
+const execFileAsync = promisify(execFile);
+const PDFTOPPM_PATH =
+    process.env.PDFTOPPM_PATH || "pdftoppm";
 
 const { askAI } = require("./ai/router");
 
@@ -307,55 +317,246 @@ ${material.slice(0, 50000)}
 // ========================================
 
 
+// ========================================
+// PDF TEXT EXTRACTION + OCR
+// ========================================
+
 app.post("/extract-pdf", async (req, res) => {
     let parser = null;
+    let worker = null;
+    let tempDir = null;
 
     try {
-        const { data } = req.body;
+        const { data } = req.body || {};
 
-        if (!data) {
+        if (!data || typeof data !== "string") {
             return res.status(400).json({
                 success: false,
-                error: "PDF data is required"
+                error: "PDF Base64 data is required."
             });
         }
 
-        console.log("📄 Extracting text from PDF...");
-        console.log(`📦 Base64 length: ${data.length}`);
+        // Support raw Base64 or a PDF data URL.
+        const base64 = data
+            .replace(/^data:application\/pdf;base64,/i, "")
+            .replace(/\s/g, "");
 
-        const buffer = Buffer.from(data, "base64");
-
-        console.log(`📦 PDF size: ${buffer.length} bytes`);
-
-        if (!buffer.length) {
+        if (
+            !base64 ||
+            base64.length % 4 === 1 ||
+            !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)
+        ) {
             return res.status(400).json({
                 success: false,
-                error: "Empty PDF data"
+                error: "Invalid Base64 PDF data."
             });
         }
 
-        parser = new PDFParse({
-            data: buffer,
-            CanvasFactory
-        });
+        const buffer = Buffer.from(base64, "base64");
 
-        const result = await parser.getText();
+        if (
+            buffer.length < 5 ||
+            buffer.subarray(0, 5).toString() !== "%PDF-"
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: "Invalid PDF file."
+            });
+        }
 
-        const text = (result.text || "").trim();
+        const MAX_PDF_BYTES = 25 * 1024 * 1024;
 
-        console.log(`✅ Extracted ${text.length} characters`);
+        if (buffer.length > MAX_PDF_BYTES) {
+            return res.status(413).json({
+                success: false,
+                error: "PDF exceeds the 25 MB limit."
+            });
+        }
 
-        res.json({
+        console.log("\n📄 Starting PDF extraction");
+        console.log("📦 PDF size:", buffer.length, "bytes");
+
+        // STEP 1: Try normal embedded-text extraction.
+        let text = "";
+
+        try {
+            parser = new PDFParse({
+                data: buffer,
+                CanvasFactory
+            });
+
+            const result = await parser.getText();
+            text = (result.text || "").trim();
+
+        } catch (error) {
+            console.warn(
+                "⚠️ Embedded-text extraction failed:",
+                error.message
+            );
+
+        } finally {
+            if (parser) {
+                try {
+                    await parser.destroy();
+                } catch { }
+
+                parser = null;
+            }
+        }
+
+        console.log(
+            "📝 Embedded text characters:",
+            text.length
+        );
+
+        // STEP 2: Return embedded text if sufficient.
+        if (text.replace(/\s/g, "").length >= 30) {
+            console.log("✅ Using embedded PDF text");
+
+            return res.json({
+                success: true,
+                text,
+                method: "pdf-text",
+                characters: text.length
+            });
+        }
+
+        // STEP 3: Render the PDF into page images.
+        console.log("🚀 OCR PIPELINE STARTED");
+        console.log("🖼️ Rendering PDF pages with Poppler...");
+
+        tempDir = await fs.mkdtemp(
+            path.join(os.tmpdir(), "studentai-pdf-")
+        );
+
+        const pdfPath = path.join(tempDir, "input.pdf");
+        const imagePrefix = path.join(tempDir, "page");
+
+        await fs.writeFile(pdfPath, buffer);
+
+        try {
+            await execFileAsync(
+                PDFTOPPM_PATH,
+                [
+                    "-f", "1",
+                    "-l", "30",
+                    "-r", "250",
+                    "-png",
+                    pdfPath,
+                    imagePrefix
+                ],
+                {
+                    timeout: 120000,
+                    maxBuffer: 5 * 1024 * 1024
+                }
+            );
+
+        } catch (error) {
+            if (error.code === "ENOENT") {
+                throw new Error(
+                    `Poppler executable was not found: ${PDFTOPPM_PATH}. ` +
+                    "Ensure Poppler is installed and PDFTOPPM_PATH is configured correctly."
+                );
+            }
+
+            throw new Error(
+                `PDF rendering failed: ${error.message}`
+            );
+        }
+
+        const files = await fs.readdir(tempDir);
+
+        const imageFiles = files
+            .filter(name => /^page-\d+\.png$/i.test(name))
+            .sort((a, b) => {
+                const pageA = Number(
+                    a.match(/-(\d+)\.png$/i)[1]
+                );
+
+                const pageB = Number(
+                    b.match(/-(\d+)\.png$/i)[1]
+                );
+
+                return pageA - pageB;
+            });
+
+        if (imageFiles.length === 0) {
+            throw new Error(
+                "Poppler did not generate any page images."
+            );
+        }
+
+        console.log(
+            `🖼️ Rendered ${imageFiles.length} page(s).`
+        );
+
+        // STEP 4: Recognize text from the rendered images.
+        console.log("🔤 Initializing Tesseract OCR...");
+
+        worker = await createWorker("eng");
+
+        const pageTexts = [];
+
+        for (let i = 0; i < imageFiles.length; i++) {
+            const imagePath = path.join(
+                tempDir,
+                imageFiles[i]
+            );
+
+            console.log(
+                `🔎 OCR processing page ${i + 1}/${imageFiles.length}`
+            );
+
+            const { data: ocrResult } =
+                await worker.recognize(imagePath);
+
+            const pageText = (ocrResult.text || "").trim();
+
+            pageTexts.push(
+                `--- Page ${i + 1} ---\n${pageText}`
+            );
+
+            console.log(
+                `📝 Page ${i + 1}: ${pageText.length} characters`
+            );
+        }
+
+        // STEP 5: Return the recognized text.
+        text = pageTexts.join("\n\n").trim();
+
+        const recognizedText = text
+            .replace(/--- Page \d+ ---/g, "")
+            .trim();
+
+        if (recognizedText.length < 10) {
+            return res.status(422).json({
+                success: false,
+                error:
+                    "OCR could not recognize readable text. " +
+                    "Try a clearer or higher-resolution PDF.",
+                method: "ocr",
+                characters: recognizedText.length
+            });
+        }
+
+        console.log(
+            `✅ OCR completed: ${recognizedText.length} characters`
+        );
+
+        return res.json({
             success: true,
-            text
+            text,
+            method: "ocr",
+            characters: recognizedText.length,
+            pagesProcessed: imageFiles.length
         });
 
     } catch (error) {
         console.error("❌ PDF extraction error:", error);
 
-        res.status(500).json({
+        return res.status(500).json({
             success: false,
-            error: error.message || "Failed to extract PDF"
+            error: error.message || "PDF extraction failed."
         });
 
     } finally {
@@ -363,6 +564,31 @@ app.post("/extract-pdf", async (req, res) => {
             try {
                 await parser.destroy();
             } catch { }
+        }
+
+        if (worker) {
+            try {
+                await worker.terminate();
+            } catch (error) {
+                console.warn(
+                    "OCR worker cleanup warning:",
+                    error.message
+                );
+            }
+        }
+
+        if (tempDir) {
+            try {
+                await fs.rm(tempDir, {
+                    recursive: true,
+                    force: true
+                });
+            } catch (error) {
+                console.warn(
+                    "Temporary-file cleanup warning:",
+                    error.message
+                );
+            }
         }
     }
 });
